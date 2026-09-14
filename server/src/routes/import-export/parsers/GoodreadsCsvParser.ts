@@ -161,6 +161,15 @@ function toAuthors(row: IGoodreadsCsvRow): string[] {
         .filter((name): name is string => !!name);
 }
 
+function toDescription(row: IGoodreadsCsvRow): string | null {
+    const review = row["My Review"]?.trim();
+    if (review) {
+        return review;
+    }
+    const notes = row["Private Notes"]?.trim();
+    return notes || null;
+}
+
 /**
  * @param csvText Raw file contents (already read into memory by multer).
  * @throws If the file isn't parseable CSV at all - a malformed individual
@@ -184,6 +193,7 @@ export function parseGoodreadsCsv(csvText: string): IImportedBook[] {
         publishedDate: yearToDate(row),
         pages: toPages(row["Number of Pages"]),
         formatName: normalizeFormatName(row.Binding),
+        description: toDescription(row),
         categoryName: toCategoryName(row.Bookshelves),
         readingStatus: toReadingStatus(row["Exclusive Shelf"]),
         ownedCopies: toOwnedCopies(row["Owned Copies"]),

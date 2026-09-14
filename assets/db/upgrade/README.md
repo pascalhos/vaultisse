@@ -31,14 +31,25 @@ file).
 
 ## Applying
 
-Files are meant to be run **in version order** (and, within a version's
-folder, in numeric order), each one **only once**. Skip any file whose
-changes your database already has — check its header comment, or just look
-at whether the column/table/label it adds already exists.
+As of the migration runner (`server/src/migrate/index.ts`, see [issue
+#26](https://github.com/AlbertAmat/vaultisse/issues/26)), this happens
+**automatically** on every server start: it applies every file here the
+running database doesn't have yet, in version order (and, within a
+version's folder, in numeric order), and records each one in the
+`schema_migrations` table so it's never applied twice. Upgrading the app
+(pulling a new Docker image, `git pull` + rebuild, ...) is now enough on its
+own — there's nothing extra to run.
+
+Manually applying a file is only needed for recovery/debugging, and is still
+just:
 
 ```bash
 docker compose exec -T db psql -U <DB_USER> -d <DB_NAME> < assets/db/upgrade/1.0.0/1.sql
 ```
+
+If you do this by hand, also insert a matching row into `schema_migrations`
+(`filename` = the file's path relative to this directory, e.g.
+`'1.0.0/1.sql'`) so the runner doesn't try to re-apply it next start.
 
 ## Adding a new one
 
@@ -54,7 +65,15 @@ When your change needs a schema change (see
 3. Otherwise create `assets/db/upgrade/X.Y.Z.sql` for that version.
 4. Add the same change to `assets/db/databaseSchema.sql` too — the two must
    stay in sync, since a fresh install only ever runs `databaseSchema.sql`.
-5. Mention the new/updated file in your PR description.
+5. Add the new file's name to the `INSERT INTO schema_migrations` list near
+   the top of `databaseSchema.sql`, right next to that same change. Without
+   this, a fresh install would already have the change but not the row
+   recording it, so the migration runner would try (and fail) to re-apply it
+   on first start - see the comment above `LEGACY_CHECKS` in
+   `server/src/migrate/index.ts` for why. You do **not** need to add a
+   `LEGACY_CHECKS` entry for a new file - that's only for files that shipped
+   before the `schema_migrations` table existed at all.
+6. Mention the new/updated file in your PR description.
 
 These files are only safe to squash or rewrite **before** they've been
 released (i.e. before anyone could plausibly have already run them against

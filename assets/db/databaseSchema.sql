@@ -1,3 +1,34 @@
+-- Tracks which files under assets/db/upgrade/ have been applied, so the
+-- migration runner (server/src/migrate/index.ts) never re-applies one. Also
+-- created defensively by the runner itself on first start, so this is only
+-- needed here for a fresh install to already have it.
+CREATE TABLE schema_migrations
+(
+    filename   VARCHAR(255) PRIMARY KEY,
+    applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Every upgrade file that exists as of this schema snapshot is already
+-- reflected above - a fresh install must not have the migration runner try
+-- (and fail) to re-apply any of them. Whenever you add a new
+-- assets/db/upgrade/X.Y.Z.sql file per that directory's README, add its
+-- filename here too, in the same commit - no LEGACY_CHECKS entry in
+-- migrate/index.ts is needed for it (that's only for files that shipped
+-- before this table existed at all, applied to real installs from back then).
+INSERT INTO schema_migrations (filename)
+VALUES ('1.0.0/1.sql'),
+       ('1.0.0/2.sql'),
+       ('1.0.0/3.sql'),
+       ('1.0.2.sql'),
+       ('1.1.0/1.sql'),
+       ('1.1.0/2.sql'),
+       ('1.1.0/3.sql'),
+       ('1.1.2.sql'),
+       ('1.1.5.sql'),
+       ('1.1.6.sql'),
+       ('1.1.7.sql'),
+       ('1.1.8.sql');
+
 CREATE TABLE app_languages
 (
     code CHAR(2) PRIMARY KEY,
@@ -63,6 +94,8 @@ VALUES ('en', 'ADD_BOOK', 'Add book'),
        ('en', 'LOG_OUT', 'Log out'),
        ('en', 'HELP', 'Help'),
        ('en', 'SCAN_BARCODE', 'Scan barcode'),
+       ('en', 'BARCODE_SCANNER_INSECURE_CONNECTION', 'Camera access requires a secure connection (HTTPS). Ask your administrator to enable HTTPS for this site.'),
+       ('en', 'BARCODE_SCANNER_CAMERA_ERROR', 'Couldn''t access the camera. Check that camera permission is allowed for this site and try again.'),
        ('en', 'ERROR_OCCURRED', 'An error has occurred'),
        ('en', 'SNACKBAR_NEW_AUTHOR_ADDED', 'New author added:'),
        ('en', 'SNACKBAR_AUTHOR_DELETED', 'Author has been deleted successfully'),
@@ -82,6 +115,7 @@ VALUES ('en', 'ADD_BOOK', 'Add book'),
        ('en', 'SNACKBAR_BOOK_UPDATED', 'Book updated successfully'),
        ('en', 'SNACKBAR_BOOK_IMAGE_UPDATED', 'Book image has been changed'),
        ('en', 'SNACKBAR_BOOK_DELETED', 'Book has been deleted'),
+       ('en', 'SNACKBAR_BOOK_COVER_NOT_FOUND', 'No cover found for this book'),
        ('en', 'BOOKED', 'Booked'),
        ('en', 'AVAILABLE', 'Available'),
        ('en', 'NOT_AVAILABLE', 'Not available'),
@@ -97,6 +131,7 @@ VALUES ('en', 'ADD_BOOK', 'Add book'),
        ('en', 'DELETE_AUTHOR_DESC', 'Are you sure that you want to remove this author?'),
        ('en', 'IMAGE_DRAG_AND_DROP', 'Drag and drop an image'),
        ('en', 'BOOK_HOVER_INFO', '(Hover to change book image)'),
+       ('en', 'FIND_COVER', 'Find cover'),
        ('en', 'EDIT_BOOK_STOCK', 'Edit book stock'),
        ('en', 'OVERVIEW', 'Overview'),
        ('en', 'BOOKED_BOOKS', 'Booked books'),
@@ -370,6 +405,8 @@ VALUES ('ca', 'ADD_BOOK', 'Afegir llibre'),
        ('ca', 'LOG_OUT', 'Tancar sessió'),
        ('ca', 'HELP', 'Ajuda'),
        ('ca', 'SCAN_BARCODE', 'Escanejar codi de barres'),
+       ('ca', 'BARCODE_SCANNER_INSECURE_CONNECTION', 'L’accés a la càmera requereix una connexió segura (HTTPS). Demana a l’administrador que habiliti HTTPS per a aquest lloc.'),
+       ('ca', 'BARCODE_SCANNER_CAMERA_ERROR', 'No s’ha pogut accedir a la càmera. Comprova que el permís de càmera estigui habilitat per a aquest lloc i torna-ho a provar.'),
        ('ca', 'ERROR_OCCURRED', 'S’ha produït un error'),
        ('ca', 'SNACKBAR_NEW_AUTHOR_ADDED', 'Nou autor afegit:'),
        ('ca', 'SNACKBAR_AUTHOR_DELETED', 'L’autor s’ha eliminat correctament'),
@@ -389,6 +426,7 @@ VALUES ('ca', 'ADD_BOOK', 'Afegir llibre'),
        ('ca', 'SNACKBAR_BOOK_UPDATED', 'El llibre s’ha actualitzat correctament'),
        ('ca', 'SNACKBAR_BOOK_IMAGE_UPDATED', 'S’ha canviat la imatge del llibre'),
        ('ca', 'SNACKBAR_BOOK_DELETED', 'El llibre s’ha eliminat'),
+       ('ca', 'SNACKBAR_BOOK_COVER_NOT_FOUND', 'No s’ha trobat cap coberta per a aquest llibre'),
        ('ca', 'BOOKED', 'Reservat'),
        ('ca', 'AVAILABLE', 'Disponible'),
        ('ca', 'NOT_AVAILABLE', 'No disponible'),
@@ -404,6 +442,7 @@ VALUES ('ca', 'ADD_BOOK', 'Afegir llibre'),
        ('ca', 'DELETE_AUTHOR_DESC', 'Segur que voleu eliminar aquest autor?'),
        ('ca', 'IMAGE_DRAG_AND_DROP', 'Arrossega i deixa anar una imatge'),
        ('ca', 'BOOK_HOVER_INFO', '(Passeu el cursor per canviar la imatge del llibre)'),
+       ('ca', 'FIND_COVER', 'Cerca coberta'),
        ('ca', 'EDIT_BOOK_STOCK', 'Editar estoc del llibre'),
        ('ca', 'OVERVIEW', 'Visió general'),
        ('ca', 'BOOKED_BOOKS', 'Llibres en préstec'),
@@ -677,6 +716,8 @@ VALUES ('es', 'ADD_BOOK', 'Agregar libro'),
        ('es', 'LOG_OUT', 'Cerrar sesión'),
        ('es', 'HELP', 'Ayuda'),
        ('es', 'SCAN_BARCODE', 'Escanear código de barras'),
+       ('es', 'BARCODE_SCANNER_INSECURE_CONNECTION', 'El acceso a la cámara requiere una conexión segura (HTTPS). Pide al administrador que habilite HTTPS para este sitio.'),
+       ('es', 'BARCODE_SCANNER_CAMERA_ERROR', 'No se ha podido acceder a la cámara. Comprueba que el permiso de cámara esté habilitado para este sitio e inténtalo de nuevo.'),
        ('es', 'ERROR_OCCURRED', 'Ha ocurrido un error'),
        ('es', 'SNACKBAR_NEW_AUTHOR_ADDED', 'Nuevo autor agregado:'),
        ('es', 'SNACKBAR_AUTHOR_DELETED', 'El autor se ha eliminado correctamente'),
@@ -696,6 +737,7 @@ VALUES ('es', 'ADD_BOOK', 'Agregar libro'),
        ('es', 'SNACKBAR_BOOK_UPDATED', 'El libro se ha actualizado correctamente'),
        ('es', 'SNACKBAR_BOOK_IMAGE_UPDATED', 'Se ha cambiado la imagen del libro'),
        ('es', 'SNACKBAR_BOOK_DELETED', 'El libro se ha eliminado'),
+       ('es', 'SNACKBAR_BOOK_COVER_NOT_FOUND', 'No se ha encontrado ninguna portada para este libro'),
        ('es', 'BOOKED', 'Reservado'),
        ('es', 'AVAILABLE', 'Disponible'),
        ('es', 'NOT_AVAILABLE', 'No disponible'),
@@ -711,6 +753,7 @@ VALUES ('es', 'ADD_BOOK', 'Agregar libro'),
        ('es', 'DELETE_AUTHOR_DESC', '¿Está seguro de que desea eliminar este autor?'),
        ('es', 'IMAGE_DRAG_AND_DROP', 'Arrastra y suelta una imagen'),
        ('es', 'BOOK_HOVER_INFO', '(Pase el cursor para cambiar la imagen del libro)'),
+       ('es', 'FIND_COVER', 'Buscar portada'),
        ('es', 'EDIT_BOOK_STOCK', 'Editar stock del libro'),
        ('es', 'OVERVIEW', 'Resumen'),
        ('es', 'BOOKED_BOOKS', 'Libros reservados'),
@@ -983,6 +1026,8 @@ VALUES ('it', 'ADD_BOOK', 'Aggiungi libro'),
        ('it', 'LOG_OUT', 'Esci'),
        ('it', 'HELP', 'Aiuto'),
        ('it', 'SCAN_BARCODE', 'Scansiona codice a barre'),
+       ('it', 'BARCODE_SCANNER_INSECURE_CONNECTION', 'L''accesso alla fotocamera richiede una connessione sicura (HTTPS). Chiedi all''amministratore di abilitare HTTPS per questo sito.'),
+       ('it', 'BARCODE_SCANNER_CAMERA_ERROR', 'Impossibile accedere alla fotocamera. Verifica che il permesso della fotocamera sia abilitato per questo sito e riprova.'),
        ('it', 'ERROR_OCCURRED', 'Si è verificato un errore'),
        ('it', 'SNACKBAR_NEW_AUTHOR_ADDED', 'Nuovo autore aggiunto:'),
        ('it', 'SNACKBAR_AUTHOR_DELETED', 'autore a stato eliminato correttamente'),
@@ -1002,6 +1047,7 @@ VALUES ('it', 'ADD_BOOK', 'Aggiungi libro'),
        ('it', 'SNACKBAR_BOOK_UPDATED', 'Il libro è stato aggiornato correttamente'),
        ('it', 'SNACKBAR_BOOK_IMAGE_UPDATED', 'L immagine del libro è stata modificata'),
        ('it', 'SNACKBAR_BOOK_DELETED', 'Il libro è stato eliminato'),
+       ('it', 'SNACKBAR_BOOK_COVER_NOT_FOUND', 'Nessuna copertina trovata per questo libro'),
        ('it', 'BOOKED', 'Prenotato'),
        ('it', 'AVAILABLE', 'Disponibile'),
        ('it', 'NOT_AVAILABLE', 'Non disponibile'),
@@ -1017,6 +1063,7 @@ VALUES ('it', 'ADD_BOOK', 'Aggiungi libro'),
        ('it', 'DELETE_AUTHOR_DESC', 'Sei sicuro di voler rimuovere questo autore?'),
        ('it', 'IMAGE_DRAG_AND_DROP', 'Trascina e rilascia un’immagine'),
        ('it', 'BOOK_HOVER_INFO', '(Passa sopra per cambiare l’immagine del libro)'),
+       ('it', 'FIND_COVER', 'Cerca copertina'),
        ('it', 'EDIT_BOOK_STOCK', 'Modifica stock del libro'),
        ('it', 'OVERVIEW', 'Panoramica'),
        ('it', 'BOOKED_BOOKS', 'Libri prenotati'),
@@ -1289,6 +1336,12 @@ CREATE TABLE users
     -- don't lend books out. Set from the Settings page (see PATCH
     -- /user/leasing in UserRoute.ts, AppMenu.vue and Router.ts client-side).
     leasing_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+    -- Optional OIDC link (issuer URL + subject from the IdP). Password-only
+    -- accounts leave these NULL. UNIQUE allows several NULLs, so existing
+    -- local accounts are unaffected. See server/src/utils/OidcUsers.ts.
+    oidc_issuer     TEXT,
+    oidc_sub        TEXT,
+    UNIQUE (oidc_issuer, oidc_sub),
     FOREIGN KEY (language) REFERENCES app_languages (code) ON DELETE SET NULL
 );
 

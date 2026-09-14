@@ -7,7 +7,7 @@
  * Owns everything related to a user's book catalog:
  *  - searching/listing/reading/updating/deleting `books`
  *  - creating books either manually or automatically from an ISBN lookup
- *    (Google Books API, with an Open Library fallback for metadata + cover)
+ *    (Open Library, optional Google Books, Wikipedia, ISBN store fallback)
  *  - managing physical copies of a book ("book stocks": add/update/remove,
  *    and bulk "return" of loaned/sold copies)
  *
@@ -18,17 +18,16 @@
  */
 import {Router, Request, Response} from 'express';
 import {appService} from "../AppService";
-import axios, {AxiosError} from "axios";
 import {v4 as uuidv4} from 'uuid';
 import {requireAuth} from "../middlewares/AuthMiddleware";
 import multer from "multer";
 import {IBookAddMd} from "../types/book/IBookAddMd";
 import {IBookFile} from "../types/book/IBookFile";
 import {Pool, PoolClient} from "pg";
-import {AppErrors} from "../types/AppErrors";
 import {SearchFilter} from "../types/search/SearchFilter";
 import {SortType} from "../types/search/SortType";
 import {normalizeAndValidateIsbn} from "../utils/IsbnVerification";
+import {fetchBookMetadata, normalizeLanguageCode, resolveBookCover} from "../utils/BookMetadata";
 import {isValidEpub, isValidMobi, isValidPdf} from "../utils/FileSignature";
 import {recordLoan, recordReturn} from "../utils/LoanHistory";
 import {handleUploadError} from "../middlewares/UploadErrorMiddleware";
@@ -691,6 +690,60 @@ router.post('/:id/image', requireAuth, upload.single("image"), handleUploadError
     }
 });
 
+/**
+ * POST /book/:id/cover/find
+ * -------------------------
+ * Look up a cover for a book that already exists in the library, using its
+ * stored ISBN (Open Library, falling back to LibraryThing when configured -
+ * see `resolveBookCover` in BookMetadata.ts), and save it as the book's cover.
+ *
+ * Auth: required. Path param `id` {number} - book id.
+ *
+ * Response (200): the new cover image URL, e.g. `"https://covers.openlibrary.org/b/isbn/...-M.jpg"`.
+ * Response (400): "Book has no ISBN" - nothing to look the cover up by.
+ * Response (404): "Book not found" | "No cover found for this book".
+ */
+router.post('/:id/cover/find', requireAuth, async (req: Request, res: Response) => {
+    const id = Number(req.params.id);
+    const pool = appService.getDatabasePool();
+    const userId = appService.getSessionUser(req);
+
+    try {
+        const book = await pool.query(
+            "SELECT isbn FROM books WHERE id = $1 AND user_id = $2",
+            [id, userId]
+        );
+
+        if (book.rowCount !== 1) {
+            return res.status(404).send("Book not found");
+        }
+
+        const isbnCode = normalizeAndValidateIsbn(book.rows[0].isbn ?? "");
+        if (!isbnCode) {
+            return res.status(400).send("Book has no ISBN");
+        }
+
+        const imageUrl = await resolveBookCover({
+            isbn: isbnCode,
+            libraryThingApiKey: appService.getLibraryThingApiKey(),
+        });
+
+        if (!imageUrl) {
+            return res.status(404).send("No cover found for this book");
+        }
+
+        await pool.query(
+            "UPDATE books SET image_url = $1 WHERE id = $2 AND user_id = $3",
+            [imageUrl, id, userId]
+        );
+
+        res.status(200).json(imageUrl);
+    } catch (error: unknown) {
+        console.error("Error finding book cover:", error);
+        res.status(500).send("Error finding book cover");
+    }
+});
+
 /** @param fileName Original uploaded file name. @returns The `book_files.file_type` its extension maps to. */
 function fileTypeFromName(fileName: string): "epub" | "pdf" | "mobi" {
     const name = fileName.toLowerCase();
@@ -918,11 +971,13 @@ router.post('', requireAuth, upload.single("image"), handleUploadError(maxCoverI
  * Create a book automatically by looking up its metadata from an ISBN,
  * instead of typing everything in by hand.
  *
- * Lookup order: Google Books API (needs `GOOGLE_BOOKS_API_KEY`) -> on
- * failure/missing key, falls back to Open Library's search API for metadata
- * and to its covers API for the image. Categories/authors/language rows are
- * created on the fly if they don't already exist for this user
- * (`__ensureCategory`, `__ensureAuthors`, `ensureLanguage`).
+ * Lookup is in `fetchBookMetadata`: Open Library (edition + work + search),
+ * optional Google Books, an ISBN store page if catalogs miss, then an Open
+ * Library cover by ISBN/title and a Wikipedia extract/cover if still thin.
+ * Categories/authors/language rows are created on the fly if they don't
+ * already exist for this user (`__ensureCategory`, `__ensureAuthors`,
+ * `ensureLanguage`). Re-scanning an ISBN the user already has fills any
+ * empty metadata fields rather than no-oping.
  *
  * Auth: required.
  * Path param: `isbn` {string} - required.
@@ -935,7 +990,7 @@ router.post('', requireAuth, upload.single("image"), handleUploadError(maxCoverI
  *
  * Response (200): the new (or already-existing, matched by isbn) book's id, e.g. `42`.
  * Responses (404): "No ISBN code provided" | "Book not found" (no metadata match).
- * Response (502): "External book service failed" (Google/Open Library request failed).
+ * Response (500): unexpected server/database error.
  */
 // @ts-ignore
 router.post(
@@ -953,10 +1008,10 @@ router.post(
         try {
             /**
              * =========================
-             * FETCH BOOK (Google → fallback OpenLibrary)
+             * FETCH BOOK (Open Library → optional Google → Wikipedia / ISBN store)
              * =========================
              */
-            const bookData = await fetchBookData(isbnCode);
+            const bookData = await fetchBookMetadata(isbnCode, appService.getGoogleApiKey(), appService.getLibraryThingApiKey());
 
             if (!bookData) {
                 return res.status(404).send('Book not found');
@@ -981,16 +1036,7 @@ router.post(
 
             const formattedPublishedDate = formatPublishedDate(publishedDate);
 
-            /**
-             * IMAGE (Google → OpenLibrary Covers fallback)
-             */
-            let imageUrl: string | null = null;
-
-            if (imageLinks?.thumbnail) {
-                imageUrl = imageLinks.thumbnail;
-            } else {
-                imageUrl = await fetchOpenLibraryCover(isbnCode);
-            }
+            const imageUrl: string | null = imageLinks?.thumbnail ?? null;
 
             const categoryName = truncate(categories?.[0] ?? null, 100);
             const languageCode = normalizeLanguageCode(language);
@@ -1034,7 +1080,7 @@ router.post(
                         publisher: truncate(publisher, 100),
                         formattedPublishedDate,
                         languageCode,
-                        pages,
+                        pages: pages && pages > 0 ? pages : null,
                     },
                     userId
                 );
@@ -1046,7 +1092,9 @@ router.post(
                     await __ensureAuthors(
                         client,
                         bookId,
-                        authors.map((author: string) => truncate(author, 100)),
+                        authors
+                            .map((author: string) => truncate(author, 100))
+                            .filter((author): author is string => Boolean(author)),
                         userId
                     );
                 }
@@ -1082,130 +1130,12 @@ router.post(
             }
         } catch (error: unknown) {
             console.error('Error fetching book details:', error);
-
-            if (axios.isAxiosError(error)) {
-                return res.status(502).send('External book service failed');
-            }
-
             return res
                 .status(500)
                 .send('Unexpected server error');
         }
     }
 );
-
-/**
- * =========================================================
- * EXTERNAL API: GOOGLE BOOKS (with retry + backoff)
- * =========================================================
- */
-/**
- * Fetch volume metadata for `isbn` from the Google Books API, retrying up to
- * `retries` times with linear backoff on HTTP 429 (rate limited). If the
- * request ultimately fails for any other reason (missing API key, network
- * error, no match), falls back to `__fetchOpenLibraryMetadata`.
- */
-async function fetchBookData(isbn: string, retries = 3): Promise<any> {
-    try {
-        const apiKey = appService.getGoogleApiKey();
-        if (!apiKey) {
-            throw new Error("Missing GOOGLE_BOOKS_API_KEY");
-        }
-
-        const { data } = await axios.get(
-            'https://www.googleapis.com/books/v1/volumes',
-            {
-                params: {
-                    q: `isbn:${isbn}`,
-                    key: apiKey
-                },
-                timeout: 9000,
-                headers: {
-                    'User-Agent': 'vaultisse-server/1.0',
-                },
-            },
-        );
-
-        return data?.items?.[0]?.volumeInfo ?? null;
-    } catch (error: unknown) {
-        if (
-            axios.isAxiosError(error) &&
-            error.response?.status === 429 &&
-            retries > 0
-        ) {
-            const delay = (4 - retries) * 1000;
-
-            await new Promise(r => setTimeout(r, delay));
-
-            return fetchBookData(isbn, retries - 1);
-        }
-
-        console.warn('Google Books failed, trying fallback...', error);
-        return __fetchOpenLibraryMetadata(isbn);
-    }
-}
-
-/**
- * =========================================================
- * FALLBACK: OPEN LIBRARY METADATA
- * =========================================================
- */
-async function __fetchOpenLibraryMetadata(isbn: string): Promise<any> {
-    try {
-        const { data } = await axios.get(
-            `https://openlibrary.org/search.json?isbn=${encodeURIComponent(isbn)}`,
-            { timeout: 9000 }
-        );
-
-        // The search endpoint returns matches under `docs`, not on the top-level object.
-        const doc = data?.docs?.[0];
-
-        if (!doc) {
-            return null;
-        }
-
-        return {
-            title: doc.title,
-            authors: doc.author_name ?? [],
-            description: undefined,
-            categories: doc.subject ?? [],
-            publisher: doc.publisher?.[0],
-            publishedDate: doc.first_publish_year ? String(doc.first_publish_year) : undefined,
-            pageCount: doc.number_of_pages_median,
-            language: doc.language?.[0],
-            imageLinks: null,
-        };
-    } catch (error) {
-        console.error('OpenLibrary fallback failed:', error);
-        return null;
-    }
-}
-
-/**
- * =========================================================
- * OPEN LIBRARY COVER
- * =========================================================
- */
-async function fetchOpenLibraryCover(isbn: string): Promise<string | null> {
-    try {
-        const url = `https://covers.openlibrary.org/b/isbn/${encodeURIComponent(isbn)}-M.jpg`;
-
-        const res = await axios.get(url, {
-            responseType: 'arraybuffer',
-            timeout: 3000,
-        });
-
-        const contentType = String(res.headers['content-type'] ?? '');
-
-        if (res.status === 200 && contentType.startsWith('image/')) {
-            return url;
-        }
-
-        return null;
-    } catch {
-        return null;
-    }
-}
 
 /**
  * =========================================================
@@ -1222,18 +1152,7 @@ function truncate(value: string | null | undefined, maxLen: number): string | nu
 }
 
 /**
- * languages.code / books.language_code are CHAR(2) and optional, so any value
- * that isn't a clean 2-letter code (missing, "unknown", ISO 639-2 3-letter
- * codes, etc.) is dropped instead of overflowing the column.
- */
-function normalizeLanguageCode(language: string | null | undefined): string | null {
-    if (!language) return null;
-    const code = language.trim().toLowerCase();
-    return /^[a-z]{2}$/.test(code) ? code : null;
-}
-
-/**
- * Insert a `languages` row for `code` if one doesn't exist yet (name defaults
+ * Insert a `languages` row for `code` if one doesn't exist yet (name defaults)
  * to the code itself, e.g. "en" - can be renamed later via the settings UI).
  */
 async function ensureLanguage(client: any, code: string | null) {
@@ -1282,7 +1201,10 @@ async function __ensureCategory(
 
 /**
  * Find-or-create a book by ISBN for this user, so re-scanning the same ISBN
- * never creates a duplicate. Returns the book id either way.
+ * never creates a duplicate. Returns the book id either way. A second scan
+ * fills only empty metadata (description, cover, publisher, date, language,
+ * pages, category) so a thin first lookup can be repaired without deleting
+ * the row.
  */
 async function __getOrCreateBook(client: any, book: any, userId: number) {
     const existing = await client.query(
@@ -1291,7 +1213,9 @@ async function __getOrCreateBook(client: any, book: any, userId: number) {
     );
 
     if (existing.rowCount > 0) {
-        return existing.rows[0].id;
+        const bookId = existing.rows[0].id;
+        await __fillEmptyBookFields(client, bookId, book, userId);
+        return bookId;
     }
 
     const insert = await client.query(
@@ -1315,6 +1239,39 @@ async function __getOrCreateBook(client: any, book: any, userId: number) {
     );
 
     return insert.rows[0].id;
+}
+
+/**
+ * Overlay freshly looked-up metadata onto an existing row, but only where
+ * the stored value is null / empty / pages=0. Never renames the book: the
+ * user may have already edited the title.
+ */
+async function __fillEmptyBookFields(client: any, bookId: number, book: any, userId: number) {
+    await client.query(
+        `UPDATE books SET
+            description = COALESCE(NULLIF(BTRIM(description), ''), $1),
+            image_url = COALESCE(image_url, $2),
+            category_id = COALESCE(category_id, $3),
+            publisher = COALESCE(publisher, $4),
+            published_date = COALESCE(published_date, $5),
+            language_code = COALESCE(language_code, $6),
+            pages = CASE
+                WHEN pages IS NULL OR pages = 0 THEN COALESCE($7, pages)
+                ELSE pages
+            END
+        WHERE id = $8 AND user_id = $9`,
+        [
+            book.description ?? null,
+            book.imageUrl ?? null,
+            book.categoryId ?? null,
+            book.publisher ?? null,
+            book.formattedPublishedDate ?? null,
+            book.languageCode ?? null,
+            book.pages ?? null,
+            bookId,
+            userId,
+        ]
+    );
 }
 
 /**
@@ -1760,11 +1717,12 @@ router.post('/return', requireAuth, upload.single("image"), handleUploadError(ma
 });
 
 // Helper function to format date to YYYY-MM-DD
-// Hosts our ISBN metadata lookups (Google Books, Open Library covers) are
-// allowed to point book cover images at.
+// Hosts our ISBN metadata lookups (Google Books, Open Library, LibraryThing
+// covers) are allowed to point book cover images at.
 const ALLOWED_IMAGE_HOSTS = new Set([
     'books.google.com',
     'covers.openlibrary.org',
+    'covers.librarything.com',
 ]);
 
 /**

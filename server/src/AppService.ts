@@ -4,7 +4,7 @@ import http, {Server} from "http"; // Node HTTP module to create server
 import pg from 'pg'; // PostgreSQL client
 import {routes} from "./routes/Routes"; // Import all application routes
 import {Logger} from "./utils/Logger"; // Custom logger utility
-import AuthRoute from "./routes/AuthRoute"; // Auth-related routes
+import AuthRoute from "./routes/auth/AuthRoute"; // Auth-related routes
 import cors from "cors"; // Cross-Origin Resource Sharing middleware
 import cookieParser from "cookie-parser"; // Middleware to parse cookies
 import jwt from "jsonwebtoken"; // JSON Web Token library for authentication
@@ -14,7 +14,9 @@ import helmet from "helmet"; // Middleware to set secure HTTP headers
 import rateLimit from "express-rate-limit";
 import path from "path"; // Middleware to limit repeated requests
 import {blockWritesInDemo} from "./middlewares/DemoModeMiddleware"; // Rejects writes when DEMO_MODE=true
+import {normalizeGoogleApiKey} from "./utils/BookMetadata";
 import "./types/express"; // Request.sessionId/sessionKey ambient augmentation - imported for its side effect, see that file's comment
+import {runMigrations} from "./migrate";
 
 interface DatabaseConf {
     host: string;
@@ -22,6 +24,16 @@ interface DatabaseConf {
     name: string;
     user: string;
     password: string;
+}
+
+/** Present only when every required OIDC env var is set. See isOidcEnabled(). */
+export interface OidcConfig {
+    issuer: string;
+    clientId: string;
+    clientSecret: string;
+    redirectUri: string;
+    scopes: string;
+    buttonLabel: string;
 }
 
 export class AppService {
@@ -92,12 +104,28 @@ export class AppService {
     private readonly m_googleApiKey: string | undefined;
 
     /**
+     * LibraryThing devkey, used as a third cover-lookup fallback (after
+     * Google Books and Open Library) when both of those have no cover for
+     * an ISBN. Optional - covers.librarything.com requires one, unlike the
+     * other two providers, so this fallback is simply skipped when unset.
+     * @private
+     */
+    private readonly m_libraryThingApiKey: string | undefined;
+
+    /**
      * Max size (in MB) accepted for a library import CSV (see ImportRoute.ts),
      * configurable via MAX_IMPORT_FILE_SIZE_MB. Defaults to 10MB when unset
      * or not a valid positive number.
      * @private
      */
     private readonly m_maxImportFileSizeMb: number;
+
+    /**
+     * OIDC client config, or null when the required env vars are unset.
+     * Presence alone does not mean SSO is offered - see isOidcEnabled().
+     * @private
+     */
+    private readonly m_oidcConfig: OidcConfig | null;
 
     /**
      * Application constructor
@@ -141,9 +169,9 @@ export class AppService {
                     styleSrc: ["'self'", "'unsafe-inline'"],
                     frameSrc: ["'self'", "data:", "blob:"],
                     // Book covers are either our own uploads (data: URIs) or fetched
-                    // from these two ISBN metadata providers - kept in sync with the
+                    // from these ISBN metadata providers - kept in sync with the
                     // isAllowedImageUrl() allowlist in BooksRoute.ts.
-                    imgSrc: ["'self'", "data:", "https://books.google.com", "http://books.google.com", "https://covers.openlibrary.org"],
+                    imgSrc: ["'self'", "data:", "https://books.google.com", "http://books.google.com", "https://covers.openlibrary.org", "https://covers.librarything.com"],
                     "script-src-attr": ["'unsafe-inline'"],
                     "script-src-elem": ["'unsafe-inline'", "'self'", frontEndUrl, "'unsafe-inline'"]
                 },
@@ -192,12 +220,16 @@ export class AppService {
         this.m_sessionTime  = Number(process.env.SESSION_TIME);
         this.m_allowDevAuth = process.env.ALLOW_DEV_AUTH == "true";
 
-        this.m_googleApiKey = String(process.env.GOOGLE_BOOKS_API_KEY)
+        this.m_googleApiKey = normalizeGoogleApiKey(process.env.GOOGLE_BOOKS_API_KEY);
+
+        this.m_libraryThingApiKey = process.env.LIBRARYTHING_API_KEY || undefined;
 
         const parsedMaxImportFileSizeMb = Number(process.env.MAX_IMPORT_FILE_SIZE_MB);
         this.m_maxImportFileSizeMb = Number.isFinite(parsedMaxImportFileSizeMb) && parsedMaxImportFileSizeMb > 0
             ? parsedMaxImportFileSizeMb
             : 10;
+
+        this.m_oidcConfig = AppService.__readOidcConfig();
 
         this.m_server       = null;
 
@@ -206,10 +238,22 @@ export class AppService {
     }
 
     /**
-     * Initialize the API server
+     * Initialize the API server: brings the database schema up to date (see
+     * server/src/migrate/index.ts and GitHub issue #26), then loads routes
+     * and starts listening. Exits the process if migrations fail, rather
+     * than serving requests against a schema the app doesn't expect.
      */
-    public init() {
+    public async init() {
         AppService.__printBanner();
+
+        try {
+            await runMigrations(this.m_databasePool, this.m_logger);
+        } catch (e) {
+            const message = e instanceof Error ? e.message : String(e);
+            console.error(`Database migration failed, exiting: ${message}`);
+            this.m_logger.error(`Database migration failed, exiting: ${message}`);
+            process.exit(1);
+        }
 
         const server = http.createServer(this.m_app);
 
@@ -247,9 +291,14 @@ export class AppService {
         return this.m_jwtSecret;
     }
 
-    /** Get the configured Google Books API key (undefined falls back to Open Library, see BooksRoute.ts). */
+    /** Optional Google Books API key. Empty / unset means ISBN lookup skips Google. */
     public getGoogleApiKey(): string | undefined {
         return this.m_googleApiKey;
+    }
+
+    /** Get the configured LibraryThing devkey (undefined skips this third cover-lookup fallback, see BooksRoute.ts). */
+    public getLibraryThingApiKey(): string | undefined {
+        return this.m_libraryThingApiKey;
     }
 
     /** Max size (in MB) accepted for a library import CSV, see ImportRoute.ts and GET /app/policy. */
@@ -265,6 +314,26 @@ export class AppService {
     /** Get database connection pool */
     public getDatabasePool(): pg.Pool {
         return this.m_databasePool;
+    }
+
+    /**
+     * Read OIDC client config from env vars. Returns null when any of the
+     * required vars is unset - see OidcConfig / isOidcEnabled().
+     * @private
+     */
+    private static __readOidcConfig(): OidcConfig | null {
+        const issuer = (process.env.OIDC_ISSUER ?? "").trim();
+        const clientId = (process.env.OIDC_CLIENT_ID ?? "").trim();
+        const clientSecret = (process.env.OIDC_CLIENT_SECRET ?? "").trim();
+        const redirectUri = (process.env.OIDC_REDIRECT_URI ?? "").trim();
+        if (!issuer || !clientId || !clientSecret || !redirectUri) {
+            return null;
+        }
+
+        const scopes = (process.env.OIDC_SCOPES ?? "").trim() || "openid profile email";
+        const buttonLabel = (process.env.OIDC_BUTTON_LABEL ?? "").trim() || "Sign in with SSO";
+
+        return {issuer, clientId, clientSecret, redirectUri, scopes, buttonLabel};
     }
 
     /**
@@ -317,6 +386,19 @@ export class AppService {
     /** Check if development authentication is allowed */
     public allowDevAuth(): boolean {
         return this.m_allowDevAuth;
+    }
+
+    /**
+     * SSO is offered only when OIDC is fully configured and this is not a
+     * public demo (JIT on a shared demo catalog would create real accounts).
+     */
+    public isOidcEnabled(): boolean {
+        return this.m_oidcConfig !== null && process.env.DEMO_MODE !== "true";
+    }
+
+    /** Configured OIDC client, or null when the required env vars are unset. */
+    public getOidcConfig(): OidcConfig | null {
+        return this.m_oidcConfig;
     }
 
     /**

@@ -1,6 +1,7 @@
 import axios from "axios";
 import {setupTestApp} from "../helpers/testApp";
 import {createAuthenticatedUser, ITestUser} from "../helpers/auth";
+import {appService} from "../../src/AppService";
 
 jest.mock("axios");
 const mockedAxios = axios as jest.Mocked<typeof axios>;
@@ -218,16 +219,16 @@ describe("GET /book/counters", () => {
 describe("POST /book/isbn/:isbn (external metadata lookup)", () => {
     /**
      * GOOGLE_BOOKS_API_KEY is forced empty in tests (see test/setup/testEnv.js),
-     * so `fetchBookData` always takes the Open Library fallback branch, never
-     * the Google Books one - this mocks that branch's two calls (metadata
-     * search, then the covers API) by URL, rather than assuming either
-     * provider specifically. If a real key is ever configured, this
-     * intentionally isn't what would run in production.
+     * so Google Books is skipped entirely. The mock covers Open Library
+     * `search.json` plus the covers API; other OL/Wikipedia/store URLs fall
+     * through to an empty JSON body. If a real key is ever configured in a
+     * developer `.env`, testEnv still wins so this path stays deterministic.
      */
     function mockOpenLibraryMetadata(overrides: {title?: string; authorName?: string[]; pages?: number} = {}) {
         mockedAxios.get.mockImplementation((url: string) => {
             if (url.includes("openlibrary.org/search.json")) {
                 return Promise.resolve({
+                    status: 200,
                     data: {
                         docs: [{
                             title: overrides.title ?? "Mocked Book Title",
@@ -242,9 +243,13 @@ describe("POST /book/isbn/:isbn (external metadata lookup)", () => {
                 });
             }
             if (url.includes("covers.openlibrary.org")) {
-                return Promise.resolve({status: 200, headers: {"content-type": "image/jpeg"}});
+                return Promise.resolve({
+                    status: 200,
+                    headers: {"content-type": "image/jpeg"},
+                    data: Buffer.alloc(1000, 1),
+                });
             }
-            return Promise.resolve({data: {}});
+            return Promise.resolve({status: 200, data: {}});
         });
     }
 
@@ -256,7 +261,33 @@ describe("POST /book/isbn/:isbn (external metadata lookup)", () => {
         const id = res.body;
 
         const getRes = await user.agent.get(`/api/rest/book/${id}`);
-        expect(getRes.body).toMatchObject({name: "Mocked Book Title", publisher: "Mock Publisher", pages: 123});
+        expect(getRes.body).toMatchObject({
+            name: "Mocked Book Title",
+            publisher: "Mock Publisher",
+            pages: 123,
+            language_code: "en",
+        });
+        expect(getRes.body.authors).toEqual([{id: expect.any(Number), name: "Mock Author"}]);
+    });
+
+    it("fills empty metadata when the ISBN is already on a thin manual row", async () => {
+        const created = await user.agent.post("/api/rest/book")
+            .field("name", "Thin Manual Book")
+            .field("isbn", "9780261102217");
+        expect(created.status).toBe(200);
+
+        mockOpenLibraryMetadata({title: "Looked Up Title"});
+        const rescan = await user.agent.post("/api/rest/book/isbn/9780261102217");
+        expect(rescan.status).toBe(200);
+        expect(rescan.body).toBe(created.body);
+
+        const getRes = await user.agent.get(`/api/rest/book/${created.body}`);
+        expect(getRes.body).toMatchObject({
+            name: "Thin Manual Book",
+            publisher: "Mock Publisher",
+            pages: 123,
+            language_code: "en",
+        });
         expect(getRes.body.authors).toEqual([{id: expect.any(Number), name: "Mock Author"}]);
     });
 
@@ -274,8 +305,131 @@ describe("POST /book/isbn/:isbn (external metadata lookup)", () => {
     });
 
     it("404s when no metadata is found anywhere", async () => {
-        mockedAxios.get.mockResolvedValue({data: {}}); // No `docs` in the Open Library response.
+        mockedAxios.get.mockResolvedValue({status: 200, data: {}});
         const res = await user.agent.post("/api/rest/book/isbn/9780261102217");
+        expect(res.status).toBe(404);
+    });
+
+    it("falls back to Open Library when Google Books succeeds with no matching volume", async () => {
+        const apiKeySpy = jest.spyOn(appService, "getGoogleApiKey").mockReturnValue("test-key");
+        mockedAxios.get.mockImplementation((url: string) => {
+            if (url.includes("googleapis.com")) {
+                return Promise.resolve({data: {items: []}}); // No error - just no match.
+            }
+            if (url.includes("openlibrary.org/search.json")) {
+                return Promise.resolve({data: {docs: [{title: "Found Via Fallback", author_name: ["Fallback Author"]}]}});
+            }
+            return Promise.resolve({data: {}});
+        });
+
+        const res = await user.agent.post("/api/rest/book/isbn/9780261102217");
+        expect(res.status).toBe(200);
+
+        const getRes = await user.agent.get(`/api/rest/book/${res.body}`);
+        expect(getRes.body).toMatchObject({name: "Found Via Fallback"});
+
+        apiKeySpy.mockRestore();
+    });
+});
+
+describe("POST /book/:id/cover/find (existing-book cover lookup)", () => {
+    it("finds and saves a cover for a book with an ISBN but no cover", async () => {
+        const bookRes = await user.agent.post("/api/rest/book").field("name", "Coverless Book").field("isbn", "9780261102217");
+        const bookId = bookRes.body;
+
+        mockedAxios.get.mockImplementation((url: string) => {
+            if (url.includes("openlibrary.org/search.json")) {
+                return Promise.resolve({data: {}}); // No metadata match - only the cover matters here.
+            }
+            if (url.includes("covers.openlibrary.org")) {
+                return Promise.resolve({status: 200, headers: {"content-type": "image/jpeg"}, data: Buffer.alloc(1000)});
+            }
+            return Promise.resolve({data: {}});
+        });
+
+        const res = await user.agent.post(`/api/rest/book/${bookId}/cover/find`);
+        expect(res.status).toBe(200);
+        expect(res.body).toContain("covers.openlibrary.org");
+
+        const getRes = await user.agent.get(`/api/rest/book/${bookId}`);
+        expect(getRes.body.image_url).toBe(res.body);
+    });
+
+    it("falls back to LibraryThing when Open Library has no cover either", async () => {
+        const apiKeySpy = jest.spyOn(appService, "getLibraryThingApiKey").mockReturnValue("test-lt-key");
+        const bookRes = await user.agent.post("/api/rest/book").field("name", "LibraryThing Book").field("isbn", "9780261102217");
+        const bookId = bookRes.body;
+
+        mockedAxios.get.mockImplementation((url: string) => {
+            if (url.includes("openlibrary.org/search.json")) {
+                return Promise.resolve({data: {}});
+            }
+            if (url.includes("covers.openlibrary.org")) {
+                return Promise.resolve({status: 200, headers: {}}); // No image Content-Type - Open Library has none.
+            }
+            if (url.includes("covers.librarything.com")) {
+                return Promise.resolve({status: 200, headers: {"content-type": "image/jpeg"}, data: Buffer.alloc(2000)});
+            }
+            return Promise.resolve({data: {}});
+        });
+
+        const res = await user.agent.post(`/api/rest/book/${bookId}/cover/find`);
+        expect(res.status).toBe(200);
+        expect(res.body).toContain("covers.librarything.com");
+
+        apiKeySpy.mockRestore();
+    });
+
+    it("treats LibraryThing's 1x1 placeholder GIF as no cover found", async () => {
+        const apiKeySpy = jest.spyOn(appService, "getLibraryThingApiKey").mockReturnValue("test-lt-key");
+        const bookRes = await user.agent.post("/api/rest/book").field("name", "No Cover Anywhere Book").field("isbn", "9780261102217");
+        const bookId = bookRes.body;
+
+        mockedAxios.get.mockImplementation((url: string) => {
+            if (url.includes("openlibrary.org/search.json")) {
+                return Promise.resolve({data: {}});
+            }
+            if (url.includes("covers.openlibrary.org")) {
+                return Promise.resolve({status: 200, headers: {}});
+            }
+            if (url.includes("covers.librarything.com")) {
+                // The real placeholder - a tiny transparent GIF, but with a genuine image Content-Type.
+                return Promise.resolve({status: 200, headers: {"content-type": "image/gif"}, data: Buffer.alloc(50)});
+            }
+            return Promise.resolve({data: {}});
+        });
+
+        const res = await user.agent.post(`/api/rest/book/${bookId}/cover/find`);
+        expect(res.status).toBe(404);
+
+        apiKeySpy.mockRestore();
+    });
+
+    it("404s when no cover is found anywhere and LIBRARYTHING_API_KEY isn't configured", async () => {
+        const bookRes = await user.agent.post("/api/rest/book").field("name", "Truly Coverless Book").field("isbn", "9780261102217");
+        const bookId = bookRes.body;
+
+        mockedAxios.get.mockImplementation((url: string) => {
+            if (url.includes("covers.openlibrary.org")) {
+                return Promise.resolve({status: 200, headers: {}});
+            }
+            return Promise.resolve({data: {}});
+        });
+
+        const res = await user.agent.post(`/api/rest/book/${bookId}/cover/find`);
+        expect(res.status).toBe(404);
+    });
+
+    it("400s when the book has no ISBN", async () => {
+        const bookRes = await user.agent.post("/api/rest/book").field("name", "No ISBN Book");
+        const res = await user.agent.post(`/api/rest/book/${bookRes.body}/cover/find`);
+        expect(res.status).toBe(400);
+    });
+
+    it("404s for a book belonging to another user", async () => {
+        const bookRes = await user.agent.post("/api/rest/book").field("name", "Private Book").field("isbn", "9780261102217");
+        const otherUser = await createAuthenticatedUser(app);
+        const res = await otherUser.agent.post(`/api/rest/book/${bookRes.body}/cover/find`);
         expect(res.status).toBe(404);
     });
 });
