@@ -49,3 +49,6 @@ ecosystem-config.js
 /server/dist/AppService.js.map
 /server/dist/index.js
 /server/dist/index.js.map
+
+# macOS Finder metadata
+.DS_Store
