@@ -68,31 +68,47 @@ function toReadingStatus(shelf: string | undefined): ReadingStatusEnum | null {
 
 /**
  * "Bookshelves" lists every shelf a book is on, including its one
- * "Exclusive Shelf" redundantly - a book on "office" also lists it as
- * "office" here (or "office, to-read" if it's on both). Any shelf that
- * isn't one of the three built-in reading-status ones is a custom shelf,
- * which - short of anything else in a Goodreads export to go on - is
- * treated as where the user keeps that physical copy, one Vaultisse stock
- * per custom shelf (see `locations` on `IImportedBook`).
+ * "Exclusive Shelf" redundantly - a book on "sci-fi" also lists it as
+ * "sci-fi" here (or "sci-fi, to-read" if it's on both). Any shelf that
+ * isn't one of the three built-in reading-status ones is a custom shelf -
+ * on Goodreads these are almost always genre/topic tags (the way most
+ * people actually use custom shelves), so they're mapped onto
+ * `categoryName` here. `books.category_id` only holds one category, so
+ * when a book has several custom shelves only the first (alphabetically,
+ * for stable results across runs) is kept - the rest are simply not a
+ * Vaultisse category for this book.
  */
-function toLocationNames(bookshelves: string | undefined): string[] {
-    if (!bookshelves) return [];
+function toCategoryName(bookshelves: string | undefined): string | null {
+    if (!bookshelves) return null;
 
-    const seen = new Set<string>();
-    const names: string[] = [];
+    const names = bookshelves
+        .split(",")
+        .map((raw) => raw.trim())
+        .filter((name) => name && !(name.toLowerCase() in EXCLUSIVE_SHELF_TO_READING_STATUS));
 
-    for (const raw of bookshelves.split(",")) {
-        const name = raw.trim();
-        if (!name || name.toLowerCase() in EXCLUSIVE_SHELF_TO_READING_STATUS) continue;
+    if (names.length === 0) return null;
 
-        const key = name.toLowerCase();
-        if (!seen.has(key)) {
-            seen.add(key);
-            names.push(name);
-        }
-    }
+    names.sort((a, b) => a.localeCompare(b));
+    return names[0];
+}
 
-    return names;
+/**
+ * Goodreads' "Owned Copies" column - how many physical copies of this book
+ * the user says they own. Missing/non-numeric/blank defaults to 1 (Goodreads
+ * itself defaults new entries to 1), same as adding a book by hand always
+ * gets exactly one stock. An explicit "0" is kept as 0 (catalogued but not
+ * owned - e.g. a library book) rather than forced up to 1. Capped at 50 to
+ * keep a stray typo (or a unit mixup) from creating an absurd number of
+ * `book_stocks` rows for one row of the CSV.
+ */
+function toOwnedCopies(value: string | undefined): number | null {
+    const trimmed = value?.trim();
+    if (!trimmed) return 1;
+
+    const parsed = parseInt(trimmed, 10);
+    if (!Number.isFinite(parsed) || parsed < 0) return 1;
+
+    return Math.min(parsed, 50);
 }
 
 /**
@@ -168,7 +184,8 @@ export function parseGoodreadsCsv(csvText: string): IImportedBook[] {
         publishedDate: yearToDate(row),
         pages: toPages(row["Number of Pages"]),
         formatName: normalizeFormatName(row.Binding),
+        categoryName: toCategoryName(row.Bookshelves),
         readingStatus: toReadingStatus(row["Exclusive Shelf"]),
-        locations: toLocationNames(row.Bookshelves),
+        ownedCopies: toOwnedCopies(row["Owned Copies"]),
     }));
 }

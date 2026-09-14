@@ -141,10 +141,12 @@ router.get('/template/:origin', requireAuth, (req: Request, res: Response) => {
  * parser reports a `readingStatus` (Goodreads' "Exclusive Shelf", or the
  * Vaultisse template's "Reading Status" column), it's stored as `books.reading_status`
  * so the imported book lands directly on the matching Library nav filter. If
- * the parser reports `locations` (Goodreads' custom shelves - any shelf that
- * isn't the one "Exclusive Shelf" - e.g. a book on "office" - see
- * `GoodreadsCsvParser.ts`), one "available" stock is created per name at a
- * location found-or-created by that name, same as `categoryName`.
+ * the parser reports `locations`, one "available" stock is created per
+ * name at a location found-or-created by that name, same as `categoryName`.
+ * Otherwise (Goodreads has no notion of physical placement - its custom
+ * shelves are mapped onto `categoryName` instead, see `GoodreadsCsvParser.ts`),
+ * `ownedCopies` (default 1) location-less "available" stocks are created
+ * instead, so the book isn't left with zero tracked copies.
  *
  * Example request (curl):
  *   curl -X POST /api/rest/import/library -F "origin=goodreads" -F "file=@goodreads_library_export.csv"
@@ -244,8 +246,21 @@ router.post('/library', requireAuth, uploadCsv, handleImportUploadError, async (
 
                 await __ensureAuthors(client, bookId, book.authors, userId);
 
-                for (const locationName of book.locations ?? []) {
-                    await __addStockAtLocation(client, bookId, locationName, userId);
+                const locations = book.locations ?? [];
+                if (locations.length > 0) {
+                    for (const locationName of locations) {
+                        await __addStockAtLocation(client, bookId, locationName, userId);
+                    }
+                } else {
+                    // No explicit locations from this origin (Goodreads has no
+                    // notion of physical placement) - fall back to ownedCopies
+                    // (default 1, same as adding a book by hand) so the book
+                    // still ends up with at least one tracked, location-less stock
+                    // instead of silently having zero copies.
+                    const copies = Math.max(0, book.ownedCopies ?? 1);
+                    for (let i = 0; i < copies; i++) {
+                        await __addUnassignedStock(client, bookId, userId);
+                    }
                 }
 
                 await client.query("COMMIT");
@@ -376,6 +391,16 @@ async function __addStockAtLocation(client: any, bookId: number, locationName: s
     await client.query(
         "INSERT INTO book_stocks (book_id, code, status, location_id, user_id) VALUES ($1, $2, $3, $4, $5)",
         [bookId, code, 0, locationId, userId]
+    );
+}
+
+/** Same as `__addStockAtLocation`, but with no location at all (`location_id` is nullable) - used when the origin gave no `locations`, one call per `ownedCopies`. */
+async function __addUnassignedStock(client: any, bookId: number, userId: number): Promise<void> {
+    const code = await generateBookStockCode();
+
+    await client.query(
+        "INSERT INTO book_stocks (book_id, code, status, location_id, user_id) VALUES ($1, $2, $3, NULL, $4)",
+        [bookId, code, 0, userId]
     );
 }
 

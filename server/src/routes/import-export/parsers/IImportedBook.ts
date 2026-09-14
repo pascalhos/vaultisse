@@ -34,10 +34,19 @@ export interface IImportedBook {
     readingStatus?: ReadingStatusEnum | null;
     /**
      * Names of physical locations the book should get one "available" stock
-     * at each - find-or-created per user, same as `categoryName`. One entry
-     * per copy the origin implies the user owns (Goodreads' custom shelves,
-     * e.g. "office", once its one `readingStatus` shelf is excluded).
-     * Omitted/empty for an origin with no notion of physical placement.
+     * at each - find-or-created per user, same as `categoryName`. Omitted/empty
+     * for an origin with no notion of physical placement - `ImportRoute.ts`
+     * then falls back to creating `ownedCopies` location-less stocks instead,
+     * so the book still ends up with at least one tracked copy.
      */
     locations?: string[];
+    /**
+     * How many physical copies of this book the origin says the user owns
+     * (Goodreads' "Owned Copies" column). Only consulted by `ImportRoute.ts`
+     * when `locations` is empty/omitted - each copy becomes one "available"
+     * stock with no location assigned. Omitted/null defaults to 1 (matching
+     * the single stock a book gets when added by hand via `BooksRoute.ts`);
+     * an origin can pass 0 to explicitly mean "catalogued but not owned".
+     */
+    ownedCopies?: number | null;
 }

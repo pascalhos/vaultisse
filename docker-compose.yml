@@ -16,7 +16,14 @@ services:
       retries: 10
 
   app:
+    # ghcr.io/albertamat/vaultisse is only published for linux/amd64, which
+    # fails to pull on Apple Silicon (linux/arm64) with a manifest error.
+    # Build it locally from the Dockerfile in this repo instead - it's a
+    # plain multi-stage Node build, so it compiles fine natively on arm64.
     image: ghcr.io/albertamat/vaultisse:${APP_TAG:-latest}
+    build:
+      context: .
+      dockerfile: Dockerfile
     restart: unless-stopped
     depends_on:
       db:
