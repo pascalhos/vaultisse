@@ -115,6 +115,21 @@ export class ImportRepository {
     }
 
     /**
+     * Same as `addStockAtLocation`, but with no location at all (`location_id` is nullable) - used when the
+     * origin gave no `locations` (e.g. Goodreads, which has no notion of physical placement), one call per
+     * `IImportedBook.ownedCopies`, so the book still ends up with at least one tracked copy.
+     * @param bookId Book id.
+     * @param userId Owning user's id.
+     */
+    public async addUnassignedStock(bookId: number, userId: number): Promise<void> {
+        const code = await new BookRepository(this.db).generateStockCode();
+        await this.db.query(
+            "INSERT INTO book_stocks (book_id, code, status, location_id, user_id) VALUES ($1, $2, $3, NULL, $4)",
+            [bookId, code, 0, userId]
+        );
+    }
+
+    /**
      * Find-or-create each author by name (truncated to fit `authors.name`) for this user, then link them all to `bookId` in `book_authors`.
      * @param bookId Book id.
      * @param authors Author names.

@@ -149,8 +149,20 @@ export class ImportService {
 
                     await repo.ensureAuthors(bookId, book.authors, userId);
 
-                    for (const locationName of book.locations ?? []) {
-                        await repo.addStockAtLocation(bookId, locationName, userId);
+                    const locations = book.locations ?? [];
+                    if (locations.length > 0) {
+                        for (const locationName of locations) {
+                            await repo.addStockAtLocation(bookId, locationName, userId);
+                        }
+                    } else {
+                        // No explicit locations from this origin (Goodreads has no notion of
+                        // physical placement) - fall back to ownedCopies (default 1, same as
+                        // adding a book by hand) so the book still ends up with at least one
+                        // tracked, location-less stock instead of silently having zero copies.
+                        const copies = Math.max(0, book.ownedCopies ?? 1);
+                        for (let i = 0; i < copies; i++) {
+                            await repo.addUnassignedStock(bookId, userId);
+                        }
                     }
 
                     await client.query("COMMIT");
