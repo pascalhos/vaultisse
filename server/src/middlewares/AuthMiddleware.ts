@@ -55,10 +55,10 @@ async function resolveSession(req: Request, res: Response): Promise<SessionResol
 
         // Look up the real current token_version for the fake user so the
         // check below (identical for dev and real tokens) accepts it.
-        const devTokenVersion = (await authRepo.getActiveUserTokenVersion(1)) ?? 0;
+        const devUser = await authRepo.getActiveUserTokenVersion(1);
 
         // Fake decoded token for dev
-        req.cookies.token = appService.createSessionToken(1, devTokenVersion, DEV_SESSION_KEY); // fake user ID
+        req.cookies.token = appService.createSessionToken(1, devUser?.tokenVersion ?? 0, DEV_SESSION_KEY); // fake user ID
     }
 
     const token = req.cookies.token;
@@ -78,9 +78,9 @@ async function resolveSession(req: Request, res: Response): Promise<SessionResol
         return "unauthorized";
     }
 
-    const currentTokenVersion = await authRepo.getActiveUserTokenVersion(decoded.user_id);
+    const activeUser = await authRepo.getActiveUserTokenVersion(decoded.user_id);
 
-    if (currentTokenVersion === null) {
+    if (activeUser === null) {
         return "unauthorized";
     }
 
@@ -88,8 +88,25 @@ async function resolveSession(req: Request, res: Response): Promise<SessionResol
     // token_version) no longer match - reject them even though the JWT
     // signature itself is still valid. This is what makes logout-elsewhere /
     // password-change session revocation possible with stateless JWTs.
-    if (decoded.token_version !== currentTokenVersion) {
+    if (decoded.token_version !== activeUser.tokenVersion) {
         return "unauthorized";
+    }
+
+    // The vault every catalog resource is scoped to (issue #7), plus the
+    // caller's role permissions in it - both resolved only through an
+    // ACCEPTED membership (see AuthRepository.getActiveUserTokenVersion). A
+    // user with none leaves req.vaultId unset; vault-scoped routes must
+    // treat that as "nothing to act in", not assume it's always present.
+    if (activeUser.activeVaultId !== null && activeUser.permissions !== null) {
+        req.vaultId = activeUser.activeVaultId;
+        req.vaultPermissions = activeUser.permissions;
+    }
+
+    // last_used_vault_id pointed somewhere the caller is no longer an
+    // accepted member of - repair it so GET /app/policy reports the vault
+    // requests are really scoped to.
+    if (activeUser.storedVaultId !== activeUser.activeVaultId) {
+        await authRepo.repairActiveVault(decoded.user_id, activeUser.activeVaultId);
     }
 
     if (decoded.sid !== DEV_SESSION_KEY) {
@@ -125,7 +142,7 @@ async function resolveSession(req: Request, res: Response): Promise<SessionResol
 
     if (timeLeft < 5 * 60) {
         // Issue new token with extended expiration
-        const newToken = appService.createSessionToken(decoded.user_id, currentTokenVersion, decoded.sid);
+        const newToken = appService.createSessionToken(decoded.user_id, activeUser.tokenVersion, decoded.sid);
 
         SessionCookie.setSessionCookie(res, newToken);
     }
