@@ -150,16 +150,8 @@ export class ImportService {
 
                     await repo.ensureAuthors(bookId, book.authors, vaultId);
 
-                    const locations = book.locations ?? [];
-                    if (locations.length > 0) {
-                        for (const locationName of locations) {
-                            await repo.addStockAtLocation(bookId, locationName, vaultId);
-                        }
-                    } else {
-                        // No locations from this book (e.g. a Goodreads row with no custom
-                        // shelves) - fall back to one location-less stock so the book still
-                        // ends up with at least one tracked copy instead of silently zero.
-                        await repo.addUnassignedStock(bookId, vaultId);
+                    for (const locationName of book.locations ?? []) {
+                        await repo.addStockAtLocation(bookId, locationName, vaultId);
                     }
 
                     await client.query("COMMIT");
