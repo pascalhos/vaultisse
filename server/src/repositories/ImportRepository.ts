@@ -115,9 +115,9 @@ export class ImportRepository {
     }
 
     /**
-     * Same as `addStockAtLocation`, but with no location at all (`location_id` is nullable) - used when the
-     * origin gave no `locations` (e.g. Goodreads, which has no notion of physical placement), one call per
-     * `IImportedBook.ownedCopies`, so the book still ends up with at least one tracked copy.
+     * Same as `addStockAtLocation`, but with no location at all (`location_id` is nullable) - used when
+     * `IImportedBook.locations` is empty (e.g. a Goodreads row with no custom shelves), one call, so the
+     * book still ends up with at least one tracked copy instead of silently having zero.
      * @param bookId Book id.
      * @param vaultId Vault id.
      */

@@ -156,14 +156,10 @@ export class ImportService {
                             await repo.addStockAtLocation(bookId, locationName, vaultId);
                         }
                     } else {
-                        // No explicit locations from this origin (Goodreads has no notion of
-                        // physical placement) - fall back to ownedCopies (default 1, same as
-                        // adding a book by hand) so the book still ends up with at least one
-                        // tracked, location-less stock instead of silently having zero copies.
-                        const copies = Math.max(0, book.ownedCopies ?? 1);
-                        for (let i = 0; i < copies; i++) {
-                            await repo.addUnassignedStock(bookId, vaultId);
-                        }
+                        // No locations from this book (e.g. a Goodreads row with no custom
+                        // shelves) - fall back to one location-less stock so the book still
+                        // ends up with at least one tracked copy instead of silently zero.
+                        await repo.addUnassignedStock(bookId, vaultId);
                     }
 
                     await client.query("COMMIT");

@@ -101,9 +101,8 @@ export class GoodreadsCsvParser {
             pages: GoodreadsCsvParser.toPages(row["Number of Pages"]),
             formatName: GoodreadsCsvParser.normalizeFormatName(row.Binding),
             description: GoodreadsCsvParser.toDescription(row),
-            categoryName: GoodreadsCsvParser.toCategoryName(row.Bookshelves),
             readingStatus: GoodreadsCsvParser.toReadingStatus(row["Exclusive Shelf"]),
-            ownedCopies: GoodreadsCsvParser.toOwnedCopies(row["Owned Copies"]),
+            locations: GoodreadsCsvParser.toLocationNames(row.Bookshelves),
         }));
     }
 
@@ -119,53 +118,34 @@ export class GoodreadsCsvParser {
 
     /**
      * "Bookshelves" lists every shelf a book is on, including its one
-     * "Exclusive Shelf" redundantly - a book on "sci-fi" also lists it as
-     * "sci-fi" here (or "sci-fi, to-read" if it's on both). Any shelf that
-     * isn't one of the three built-in reading-status ones is a custom shelf -
-     * on Goodreads these are almost always genre/topic tags (the way most
-     * people actually use custom shelves), so they're mapped onto
-     * `categoryName` here rather than treated as a physical location.
-     * `books.category_id` only holds one category, so when a book has
-     * several custom shelves only the first (alphabetically, for stable
-     * results across runs) is kept.
+     * "Exclusive Shelf" redundantly - a book on "office" also lists it as
+     * "office" here (or "office, to-read" if it's on both). Any shelf that
+     * isn't one of the three built-in reading-status ones is a custom shelf,
+     * which - short of anything else in a Goodreads export to go on - is
+     * treated as where the user keeps that physical copy, one Vaultisse stock
+     * per custom shelf (see `locations` on `IImportedBook`).
      *
      * @param bookshelves Raw "Bookshelves" cell value.
-     * @returns The book's one category name, or null.
+     * @returns The distinct custom shelf names, in first-seen order.
      */
-    private static toCategoryName(bookshelves: string | undefined): string | null {
-        if (!bookshelves) return null;
+    private static toLocationNames(bookshelves: string | undefined): string[] {
+        if (!bookshelves) return [];
 
-        const names = bookshelves
-            .split(",")
-            .map((raw) => raw.trim())
-            .filter((name) => name && !(name.toLowerCase() in GoodreadsCsvParser.EXCLUSIVE_SHELF_TO_READING_STATUS));
+        const seen = new Set<string>();
+        const names: string[] = [];
 
-        if (names.length === 0) return null;
+        for (const raw of bookshelves.split(",")) {
+            const name = raw.trim();
+            if (!name || name.toLowerCase() in GoodreadsCsvParser.EXCLUSIVE_SHELF_TO_READING_STATUS) continue;
 
-        names.sort((a, b) => a.localeCompare(b));
-        return names[0];
-    }
+            const key = name.toLowerCase();
+            if (!seen.has(key)) {
+                seen.add(key);
+                names.push(name);
+            }
+        }
 
-    /**
-     * Goodreads' "Owned Copies" column - how many physical copies of this
-     * book the user says they own. Missing/non-numeric/blank defaults to 1
-     * (Goodreads itself defaults new entries to 1), same as adding a book by
-     * hand always gets exactly one stock. An explicit "0" is kept as 0
-     * (catalogued but not owned - e.g. a library book) rather than forced up
-     * to 1. Capped at 50 to keep a stray typo (or a unit mixup) from
-     * creating an absurd number of `book_stocks` rows for one CSV row.
-     *
-     * @param value Raw "Owned Copies" cell value.
-     * @returns The number of owned copies, defaulting to 1.
-     */
-    private static toOwnedCopies(value: string | undefined): number | null {
-        const trimmed = value?.trim();
-        if (!trimmed) return 1;
-
-        const parsed = parseInt(trimmed, 10);
-        if (!Number.isFinite(parsed) || parsed < 0) return 1;
-
-        return Math.min(parsed, 50);
+        return names;
     }
 
     /**
